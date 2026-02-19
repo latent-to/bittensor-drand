@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.3.0 /2026-19-02
+
+## What's Changed
+* Extend `encrypt_mlkem768` logic by @basfroman in https://github.com/opentensor/bittensor-drand/pull/66
+
+**Full Changelog**: https://github.com/opentensor/bittensor-drand/compare/v1.2.0...v1.3.0
+
 ## v1.2.0 /2025-12-01
 
 ## What's Changed
