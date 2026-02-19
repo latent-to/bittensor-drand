@@ -121,7 +121,7 @@ pub extern "C" fn cr_encrypt(
             cap: 0,
         };
     }
-    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+    let data = unsafe { slice::from_raw_parts(data_ptr, data_len) };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -190,7 +190,7 @@ pub extern "C" fn cr_decrypt(
         }
         return ptr::null_mut();
     }
-    let enc_slice = unsafe { std::slice::from_raw_parts(enc_ptr, enc_len) };
+    let enc_slice = unsafe { slice::from_raw_parts(enc_ptr, enc_len) };
 
     let user_data = match drand::UserData::decode(&mut &enc_slice[..]) {
         Ok(d) => d,
@@ -329,7 +329,7 @@ pub extern "C" fn cr_encrypt_commitment(
         };
     }
 
-    let bytes = unsafe { std::slice::from_raw_parts(data_ptr, data_len) };
+    let bytes = unsafe { slice::from_raw_parts(data_ptr, data_len) };
     let data = match std::str::from_utf8(bytes) {
         Ok(s) => s,
         Err(e) => {
@@ -431,9 +431,9 @@ pub extern "C" fn cr_generate_commit(
         };
     }
 
-    let uids = unsafe { std::slice::from_raw_parts(uids_ptr, uids_len) }.to_vec();
-    let values = unsafe { std::slice::from_raw_parts(vals_ptr, vals_len) }.to_vec();
-    let hotkey = unsafe { std::slice::from_raw_parts(hotkey_ptr, hotkey_len) }.to_vec();
+    let uids = unsafe { slice::from_raw_parts(uids_ptr, uids_len) }.to_vec();
+    let values = unsafe { slice::from_raw_parts(vals_ptr, vals_len) }.to_vec();
+    let hotkey = unsafe { slice::from_raw_parts(hotkey_ptr, hotkey_len) }.to_vec();
 
     match drand::generate_commit(
         uids,
@@ -639,7 +639,8 @@ mod tests {
     use std::ffi::CStr;
     use std::ptr;
 
-    // helper to free *mut c_char returned from FFI
+    /// # Safety
+    /// `ptr` must have been allocated by `CString::into_raw` or be null.
     unsafe fn drop_cstring(ptr: *mut c_char) {
         if !ptr.is_null() {
             let _ = CString::from_raw(ptr);
@@ -652,27 +653,21 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        // SAFETY: we pass a valid pointer/length pair.
-        let buf = unsafe {
-            cr_encrypt(
-                msg.as_ptr(),
-                msg.len(),
-                0,   // n_blocks (0 = immediate)
-                1.0, // block_time
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_encrypt(
+            msg.as_ptr(),
+            msg.len(),
+            0,   // n_blocks (0 = immediate)
+            1.0, // block_time
+            &mut round,
+            &mut err_ptr,
+        );
 
         assert!(round > 0, "round should be set");
         assert!(err_ptr.is_null(), "err_out must be NULL on success");
         assert!(!buf.ptr.is_null(), "buffer pointer must be non-NULL");
         assert!(buf.len > 0, "ciphertext must be non-empty");
 
-        // Free resources
-        unsafe {
-            cr_free(buf);
-        }
+        cr_free(buf);
     }
 
     #[test]
@@ -680,22 +675,19 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_encrypt(
-                ptr::null(), // <- bad pointer
-                5,
-                0,
-                1.0,
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_encrypt(
+            ptr::null(), // <- bad pointer
+            5,
+            0,
+            1.0,
+            &mut round,
+            &mut err_ptr,
+        );
 
         assert!(buf.ptr.is_null(), "buffer should be NULL on error");
-        assert!(round == 0, "round must stay 0 on failure");
+        assert_eq!(round, 0, "round must stay 0 on failure");
         assert!(!err_ptr.is_null(), "err_out should be set");
 
-        // grab error message for debugging (optional)
         unsafe {
             let msg = CStr::from_ptr(err_ptr).to_string_lossy();
             assert!(
@@ -709,29 +701,23 @@ mod tests {
 
     #[test]
     fn test_encrypt_zero_len() {
-        // Non-null ptr but len == 0
         let dummy = 0u8;
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_encrypt(
-                &dummy as *const u8,
-                0, // <- zero length
-                0,
-                1.0,
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_encrypt(
+            &dummy as *const u8,
+            0, // <- zero length
+            0,
+            1.0,
+            &mut round,
+            &mut err_ptr,
+        );
 
-        // We don't mandate success vs. error – just require determinism:
         if err_ptr.is_null() {
-            // Succeeded: buf.ptr must be non-NULL, free it.
             assert!(!buf.ptr.is_null(), "ptr may not be NULL on success");
-            unsafe { cr_free(buf) };
+            cr_free(buf);
         } else {
-            // Failed: buf.ptr must be NULL, free the error string.
             assert!(buf.ptr.is_null(), "ptr must be NULL on failure");
             unsafe { drop_cstring(err_ptr) };
         }
@@ -746,38 +732,30 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        // encrypt
-        let ct_buf = unsafe {
-            cr_encrypt(
-                msg.as_ptr(),
-                msg.len(),
-                0,   // unlock immediately
-                1.0, // block_time (doesn't matter)
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let ct_buf = cr_encrypt(
+            msg.as_ptr(),
+            msg.len(),
+            0,   // unlock immediately
+            1.0, // block_time (doesn't matter)
+            &mut round,
+            &mut err_ptr,
+        );
         assert!(err_ptr.is_null());
         assert!(!ct_buf.ptr.is_null());
 
-        // copy ciphertext to safe Vec (because we'll free ct_buf soon)
-        let ciphertext = unsafe { std::slice::from_raw_parts(ct_buf.ptr, ct_buf.len) }.to_vec();
+        let ciphertext = unsafe { slice::from_raw_parts(ct_buf.ptr, ct_buf.len) }.to_vec();
 
-        // free Rust allocation backing the ciphertext buffer
-        unsafe { cr_free(ct_buf) };
+        cr_free(ct_buf);
 
-        // decrypt
         let mut out_len: usize = 0;
         let mut dec_err: *mut c_char = ptr::null_mut();
-        let plain_ptr = unsafe {
-            cr_decrypt(
-                ciphertext.as_ptr(),
-                ciphertext.len(),
-                false, // no_errors
-                &mut out_len,
-                &mut dec_err,
-            )
-        };
+        let plain_ptr = cr_decrypt(
+            ciphertext.as_ptr(),
+            ciphertext.len(),
+            false, // no_errors
+            &mut out_len,
+            &mut dec_err,
+        );
 
         assert!(dec_err.is_null(), "decrypt error: {:?}", unsafe {
             if dec_err.is_null() {
@@ -789,11 +767,9 @@ mod tests {
         assert!(!plain_ptr.is_null());
         assert_eq!(out_len, msg.len());
 
-        // compare plaintext
-        let plain = unsafe { std::slice::from_raw_parts(plain_ptr, out_len) };
+        let plain = unsafe { slice::from_raw_parts(plain_ptr, out_len) };
         assert_eq!(plain, msg);
 
-        // free memory returned by decrypt (uses libc malloc)
         unsafe { free(plain_ptr as *mut _) };
     }
 
@@ -802,31 +778,28 @@ mod tests {
     // ---------------------------------------------------------------
     #[test]
     fn test_decrypt_invalid_ciphertext() {
-        let garbage = [0u8; 32]; // any junk bytes are fine; doesn't need RNG
+        let garbage = [0u8; 32];
         let mut out_len = 0usize;
         let mut err_ptr: *mut c_char = ptr::null_mut();
-        let plain_ptr = unsafe {
-            cr_decrypt(
-                garbage.as_ptr(),
-                garbage.len(),
-                false, // capture errors
-                &mut out_len,
-                &mut err_ptr,
-            )
-        };
+        let plain_ptr = cr_decrypt(
+            garbage.as_ptr(),
+            garbage.len(),
+            false, // capture errors
+            &mut out_len,
+            &mut err_ptr,
+        );
 
         assert!(plain_ptr.is_null());
         assert_eq!(out_len, 0);
         assert!(!err_ptr.is_null(), "error message expected");
 
         unsafe {
-            // optional assertion on message contents
             let msg = CStr::from_ptr(err_ptr).to_string_lossy();
             assert!(
                 msg.contains("Error") || msg.contains("error"),
                 "unexpected msg: {msg}"
             );
-            let _ = CString::from_raw(err_ptr); // drop
+            let _ = CString::from_raw(err_ptr);
         }
     }
 
@@ -838,15 +811,13 @@ mod tests {
         let garbage = [0u8; 16];
         let mut out_len = 0usize;
         let mut err_ptr: *mut c_char = ptr::null_mut();
-        let plain_ptr = unsafe {
-            cr_decrypt(
-                garbage.as_ptr(),
-                garbage.len(),
-                true, // suppress errors
-                &mut out_len,
-                &mut err_ptr,
-            )
-        };
+        let plain_ptr = cr_decrypt(
+            garbage.as_ptr(),
+            garbage.len(),
+            true, // suppress errors
+            &mut out_len,
+            &mut err_ptr,
+        );
 
         assert!(plain_ptr.is_null());
         assert_eq!(out_len, 0);
@@ -864,15 +835,13 @@ mod tests {
         let mut out_len: usize = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let plain_ptr = unsafe {
-            cr_decrypt(
-                ptr::null(), // bad pointer
-                10,
-                false,
-                &mut out_len,
-                &mut err_ptr,
-            )
-        };
+        let plain_ptr = cr_decrypt(
+            ptr::null(), // bad pointer
+            10,
+            false,
+            &mut out_len,
+            &mut err_ptr,
+        );
 
         assert!(plain_ptr.is_null());
         assert_eq!(out_len, 0);
@@ -887,13 +856,11 @@ mod tests {
     #[test]
     fn test_get_latest_round_success() {
         let mut err_ptr: *mut c_char = ptr::null_mut();
-        let round = unsafe { cr_get_latest_round(&mut err_ptr) };
+        let round = cr_get_latest_round(&mut err_ptr);
 
         if err_ptr.is_null() {
-            // success path
             assert!(round > 0, "round must be >0 on success");
         } else {
-            // network failure path: we only require proper error propagation
             assert_eq!(round, 0);
             unsafe { drop_cstring(err_ptr) };
         }
@@ -908,23 +875,21 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_encrypt_commitment(
-                msg.as_ptr(),
-                msg.len(),
-                5,    // blocks_until_reveal
-                12.0, // block_time
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_encrypt_commitment(
+            msg.as_ptr(),
+            msg.len(),
+            5,    // blocks_until_reveal
+            12.0, // block_time
+            &mut round,
+            &mut err_ptr,
+        );
 
         assert!(err_ptr.is_null());
         assert!(round > 0);
         assert!(!buf.ptr.is_null());
         assert!(buf.len > 0);
 
-        unsafe { cr_free(buf) };
+        cr_free(buf);
     }
 
     // ---------------------------------------------------------------
@@ -936,16 +901,14 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_encrypt_commitment(
-                bad_bytes.as_ptr(),
-                bad_bytes.len(),
-                5,
-                12.0,
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_encrypt_commitment(
+            bad_bytes.as_ptr(),
+            bad_bytes.len(),
+            5,
+            12.0,
+            &mut round,
+            &mut err_ptr,
+        );
 
         assert!(buf.ptr.is_null());
         assert_eq!(buf.len, 0);
@@ -967,30 +930,28 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_generate_commit(
-                uids.as_ptr(),
-                uids.len(),
-                vals.as_ptr(),
-                vals.len(),
-                42,     // version_key
-                20,     // tempo
-                10_000, // current_block
-                1,      // netuid
-                2,      // subnet_reveal_epochs
-                12.0,   // block_time
-                hotkey.as_ptr(),
-                hotkey.len(),
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_generate_commit(
+            uids.as_ptr(),
+            uids.len(),
+            vals.as_ptr(),
+            vals.len(),
+            42,     // version_key
+            20,     // tempo
+            10_000, // current_block
+            1,      // netuid
+            2,      // subnet_reveal_epochs
+            12.0,   // block_time
+            hotkey.as_ptr(),
+            hotkey.len(),
+            &mut round,
+            &mut err_ptr,
+        );
 
         assert!(err_ptr.is_null(), "err_out should be NULL on success");
         assert!(round > 0);
         assert!(!buf.ptr.is_null() && buf.len > 0);
 
-        unsafe { cr_free(buf) };
+        cr_free(buf);
     }
 
     // ---------------------------------------------------------------
@@ -1003,24 +964,22 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_generate_commit(
-                ptr::null(), // NULL uids
-                2,           // non-zero len
-                vals.as_ptr(),
-                vals.len(),
-                0,
-                0,
-                0,
-                0,
-                0,
-                12.0,
-                hotkey.as_ptr(),
-                hotkey.len(),
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_generate_commit(
+            ptr::null(), // NULL uids
+            2,           // non-zero len
+            vals.as_ptr(),
+            vals.len(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            12.0,
+            hotkey.as_ptr(),
+            hotkey.len(),
+            &mut round,
+            &mut err_ptr,
+        );
 
         assert!(buf.ptr.is_null());
         assert!(!err_ptr.is_null());
@@ -1038,28 +997,24 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        let buf = unsafe {
-            cr_generate_commit(
-                uids.as_ptr(),
-                uids.len(),
-                vals.as_ptr(),
-                vals.len(),
-                0,
-                0,
-                0,
-                0,
-                0,
-                12.0,
-                hotkey.as_ptr(),
-                hotkey.len(),
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_generate_commit(
+            uids.as_ptr(),
+            uids.len(),
+            vals.as_ptr(),
+            vals.len(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            12.0,
+            hotkey.as_ptr(),
+            hotkey.len(),
+            &mut round,
+            &mut err_ptr,
+        );
 
-        // implementation may error either inside Rust or FFI guard
         if err_ptr.is_null() {
-            // unexpected success – treat as failure but avoid leak
             panic!("expected error on mismatched lengths");
         } else {
             assert!(buf.ptr.is_null());
@@ -1077,10 +1032,8 @@ mod tests {
             len: 0,
             cap: 0,
         };
-        unsafe {
-            cr_free(null_buf);
-            cr_free(null_buf); // second call must not crash
-        }
+        cr_free(null_buf);
+        cr_free(null_buf); // second call must not crash
     }
 
     // ---------------------------------------------------------------
@@ -1095,18 +1048,17 @@ mod tests {
 
         let mut round: u64 = 0;
         let mut err: *mut c_char = ptr::null_mut();
-        let buf = unsafe { cr_encrypt(data.as_ptr(), data.len(), 0, 1.0, &mut round, &mut err) };
+        let buf = cr_encrypt(data.as_ptr(), data.len(), 0, 1.0, &mut round, &mut err);
         assert!(err.is_null());
-        let ct = unsafe { std::slice::from_raw_parts(buf.ptr, buf.len) }.to_vec();
-        unsafe { cr_free(buf) };
+        let ct = unsafe { slice::from_raw_parts(buf.ptr, buf.len) }.to_vec();
+        cr_free(buf);
 
         let mut out_len = 0usize;
         let mut derr: *mut c_char = ptr::null_mut();
-        let plain_ptr =
-            unsafe { cr_decrypt(ct.as_ptr(), ct.len(), false, &mut out_len, &mut derr) };
+        let plain_ptr = cr_decrypt(ct.as_ptr(), ct.len(), false, &mut out_len, &mut derr);
         assert!(derr.is_null());
         assert_eq!(out_len, data.len());
-        let plain = unsafe { std::slice::from_raw_parts(plain_ptr, out_len) };
+        let plain = unsafe { slice::from_raw_parts(plain_ptr, out_len) };
         assert_eq!(plain, &data[..]);
         unsafe { free(plain_ptr as *mut _) };
     }
@@ -1123,20 +1075,18 @@ mod tests {
                     let msg = format!("thread-{i}-payload");
                     let mut round = 0u64;
                     let mut err: *mut c_char = ptr::null_mut();
-                    let buf = unsafe {
-                        cr_encrypt(msg.as_ptr(), msg.len(), 0, 1.0, &mut round, &mut err)
-                    };
+                    let buf =
+                        cr_encrypt(msg.as_ptr(), msg.len(), 0, 1.0, &mut round, &mut err);
                     assert!(err.is_null());
-                    let ct = unsafe { std::slice::from_raw_parts(buf.ptr, buf.len) }.to_vec();
-                    unsafe { cr_free(buf) };
+                    let ct = unsafe { slice::from_raw_parts(buf.ptr, buf.len) }.to_vec();
+                    cr_free(buf);
 
                     let mut out_len = 0usize;
                     let mut derr: *mut c_char = ptr::null_mut();
-                    let plain_ptr = unsafe {
-                        cr_decrypt(ct.as_ptr(), ct.len(), false, &mut out_len, &mut derr)
-                    };
+                    let plain_ptr =
+                        cr_decrypt(ct.as_ptr(), ct.len(), false, &mut out_len, &mut derr);
                     assert!(derr.is_null());
-                    let plain = unsafe { std::slice::from_raw_parts(plain_ptr, out_len) };
+                    let plain = unsafe { slice::from_raw_parts(plain_ptr, out_len) };
                     assert_eq!(plain, msg.as_bytes());
                     unsafe { free(plain_ptr as *mut _) };
                 })
@@ -1157,36 +1107,29 @@ mod tests {
         let mut round: u64 = 0;
         let mut err_ptr: *mut c_char = ptr::null_mut();
 
-        // Encrypt for a reveal round ≈14 days in the future (100 000 × 12 s).
-        let buf = unsafe {
-            cr_encrypt(
-                msg.as_ptr(),
-                msg.len(),
-                100_000, // n_blocks
-                12.0,    // block_time
-                &mut round,
-                &mut err_ptr,
-            )
-        };
+        let buf = cr_encrypt(
+            msg.as_ptr(),
+            msg.len(),
+            100_000, // n_blocks
+            12.0,    // block_time
+            &mut round,
+            &mut err_ptr,
+        );
         assert!(err_ptr.is_null(), "encryption must succeed");
         assert!(!buf.ptr.is_null());
 
-        // Copy ciphertext, then release original buffer.
-        let ct = unsafe { std::slice::from_raw_parts(buf.ptr, buf.len) }.to_vec();
-        unsafe { cr_free(buf) };
+        let ct = unsafe { slice::from_raw_parts(buf.ptr, buf.len) }.to_vec();
+        cr_free(buf);
 
-        // Attempt to decrypt immediately – should fail (signature not available yet).
         let mut out_len: usize = 0;
         let mut dec_err: *mut c_char = ptr::null_mut();
-        let plain_ptr = unsafe {
-            cr_decrypt(
-                ct.as_ptr(),
-                ct.len(),
-                false, // capture errors
-                &mut out_len,
-                &mut dec_err,
-            )
-        };
+        let plain_ptr = cr_decrypt(
+            ct.as_ptr(),
+            ct.len(),
+            false, // capture errors
+            &mut out_len,
+            &mut dec_err,
+        );
 
         assert!(plain_ptr.is_null(), "decryption must fail for future round");
         assert_eq!(out_len, 0);
