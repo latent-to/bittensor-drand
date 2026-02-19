@@ -469,12 +469,30 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, Payload},
     XChaCha20Poly1305, XNonce,
 };
+use core::hash::Hasher;
 use core::slice;
 use ml_kem::kem::{Encapsulate, EncapsulationKey};
 use ml_kem::{Encoded, EncodedSizeUser, MlKem768Params};
 use rand_core::{OsRng, RngCore};
+use twox_hash::XxHash64;
 
 const MLKEM_NONCE_LEN: usize = 24;
+
+/// Computes Substrate-compatible `twox_128` hash (xxHash64 with seeds 0 and 1).
+fn twox_128(data: &[u8]) -> [u8; 16] {
+    let mut h0 = XxHash64::with_seed(0);
+    h0.write(data);
+    let r0 = h0.finish();
+
+    let mut h1 = XxHash64::with_seed(1);
+    h1.write(data);
+    let r1 = h1.finish();
+
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&r0.to_le_bytes());
+    out[8..].copy_from_slice(&r1.to_le_bytes());
+    out
+}
 
 /// Use the ML‑KEM shared secret directly as the AEAD key.
 ///
@@ -505,8 +523,12 @@ pub extern "C" fn mlkemffi_kdf_id(out_ptr: *mut u8, out_len: usize) -> c_int {
 
 /// Encrypt `plaintext` to `pk` using ML‑KEM‑768 + XChaCha20Poly1305.
 ///
-/// Blob layout:
+/// Blob layout (include_key_hash = false):
 ///   [u16 kem_len LE][kem_ct (kem_len bytes)][nonce24][aead_ct]
+///
+/// Blob layout (include_key_hash = true):
+///   [key_hash(16)][u16 kem_len LE][kem_ct (kem_len bytes)][nonce24][aead_ct]
+///   where key_hash = twox_128(pk_bytes)
 ///
 /// AEAD parameters:
 ///   • key = shared_secret (32 bytes, from ML‑KEM), no HKDF
@@ -521,6 +543,7 @@ pub extern "C" fn mlkem768_seal_blob(
     out_ptr: *mut u8,
     out_len: usize,
     written_out: *mut usize,
+    include_key_hash: bool,
 ) -> c_int {
     if pk_ptr.is_null() || pt_ptr.is_null() || out_ptr.is_null() || written_out.is_null() {
         return -1;
@@ -577,20 +600,28 @@ pub extern "C" fn mlkem768_seal_blob(
         Err(_) => return -6,
     };
 
-    // 4) Output: [u16 kem_len][kem_ct][nonce24][aead_ct]
-    let total_len = 2 + kem_ct_len + MLKEM_NONCE_LEN + aead_ct.len();
+    // 4) Output: [key_hash?][u16 kem_len][kem_ct][nonce24][aead_ct]
+    let key_hash_prefix_len = if include_key_hash { 16 } else { 0 };
+    let total_len = key_hash_prefix_len + 2 + kem_ct_len + MLKEM_NONCE_LEN + aead_ct.len();
     if total_len > out_len {
         return -7;
     }
 
-    out_buf[0..2].copy_from_slice(&(kem_ct_len as u16).to_le_bytes());
-    out_buf[2..2 + kem_ct_len].copy_from_slice(kem_ct_bytes);
+    let mut offset = 0;
 
-    let nonce_start = 2 + kem_ct_len;
-    out_buf[nonce_start..nonce_start + MLKEM_NONCE_LEN].copy_from_slice(&nonce);
+    if include_key_hash {
+        let kh = twox_128(pk_bytes);
+        out_buf[offset..offset + 16].copy_from_slice(&kh);
+        offset += 16;
+    }
 
-    let aead_start = nonce_start + MLKEM_NONCE_LEN;
-    out_buf[aead_start..aead_start + aead_ct.len()].copy_from_slice(&aead_ct);
+    out_buf[offset..offset + 2].copy_from_slice(&(kem_ct_len as u16).to_le_bytes());
+    offset += 2;
+    out_buf[offset..offset + kem_ct_len].copy_from_slice(kem_ct_bytes);
+    offset += kem_ct_len;
+    out_buf[offset..offset + MLKEM_NONCE_LEN].copy_from_slice(&nonce);
+    offset += MLKEM_NONCE_LEN;
+    out_buf[offset..offset + aead_ct.len()].copy_from_slice(&aead_ct);
 
     unsafe {
         *written_out = total_len;
