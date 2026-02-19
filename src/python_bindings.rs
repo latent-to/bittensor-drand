@@ -287,11 +287,13 @@ fn get_signature_for_round(reveal_round: u64) -> PyResult<String> {
 /// XChaCha20Poly1305 authenticated encryption. The public key is rotated every block
 /// and can be queried from the NextKey storage item.
 ///
-/// Blob format: [u16 kem_len LE][kem_ct][nonce24][aead_ct]
+/// Blob format (include_key_hash=false): [u16 kem_len LE][kem_ct][nonce24][aead_ct]
+/// Blob format (include_key_hash=true):  [key_hash(16)][u16 kem_len LE][kem_ct][nonce24][aead_ct]
 ///
 /// Args:
 ///     pk_bytes (bytes): ML-KEM-768 public key bytes (from NextKey storage)
 ///     plaintext (bytes): Data to encrypt
+///     include_key_hash (bool): If true, prepend twox_128(pk_bytes) to the output
 ///
 /// Returns:
 ///     bytes: Encrypted blob
@@ -299,13 +301,15 @@ fn get_signature_for_round(reveal_round: u64) -> PyResult<String> {
 /// Raises:
 ///     ValueError: If encryption fails
 #[pyfunction]
+#[pyo3(signature = (pk_bytes, plaintext, include_key_hash=false))]
 fn encrypt_mlkem768(
     py: Python,
     pk_bytes: &[u8],
     plaintext: &[u8],
+    include_key_hash: bool,
 ) -> PyResult<Py<PyBytes>> {
-    // Estimate max output size: kem_ct (~1500 bytes) + nonce (24) + aead_ct (plaintext + overhead)
-    let max_output_size = 2048 + plaintext.len() + 64; // Safe estimate
+    let extra = if include_key_hash { 16 } else { 0 };
+    let max_output_size = extra + 2048 + plaintext.len() + 64;
     let mut output = vec![0u8; max_output_size];
     let mut written = 0usize;
 
@@ -317,6 +321,7 @@ fn encrypt_mlkem768(
         output.as_mut_ptr(),
         output.len(),
         &mut written,
+        include_key_hash,
     );
 
     match result {
