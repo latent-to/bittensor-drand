@@ -179,18 +179,20 @@ def get_latest_round() -> int:
     return _get_latest_round()
 
 
-def encrypt_mlkem768(pk_bytes: bytes, plaintext: bytes) -> bytes:
+def encrypt_mlkem768(pk_bytes: bytes, plaintext: bytes, include_key_hash: bool = False) -> bytes:
     """Encrypts data using ML-KEM-768 + XChaCha20Poly1305.
 
     This function encrypts plaintext using ML-KEM-768 key encapsulation followed by XChaCha20Poly1305 authenticated
     encryption. The public key is rotated every block and can be queried from the NextKey storage item.
 
-    Blob format: [u16 kem_len LE][kem_ct][nonce24][aead_ct]
+    Blob format (include_key_hash=False): [u16 kem_len LE][kem_ct][nonce24][aead_ct]
+    Blob format (include_key_hash=True):  [key_hash(16)][u16 kem_len LE][kem_ct][nonce24][aead_ct]
 
     Arguments:
         pk_bytes: ML-KEM-768 public key bytes (from NextKey storage, 1184 bytes)
-        plaintext: Data to encrypt. For MEV Shield, this should be: payload_core + b"\\x01" + signature where
-            payload_core = signer_bytes (32B) + key_hash_bytes (32B) + SCALE(call)
+        plaintext: Data to encrypt.
+        include_key_hash: If True, prepends the twox_128 hash of pk_bytes (16 bytes) to the output.
+            Required for the MEV Shield wire format (pallet-shield v2).
 
     Returns:
         bytes: Encrypted blob
@@ -198,7 +200,7 @@ def encrypt_mlkem768(pk_bytes: bytes, plaintext: bytes) -> bytes:
     Raises:
         ValueError: If encryption fails (invalid public key, buffer too small, etc.)
     """
-    return _encrypt_mlkem768(pk_bytes, plaintext)
+    return _encrypt_mlkem768(pk_bytes, plaintext, include_key_hash)
 
 
 def mlkem_kdf_id() -> bytes:
