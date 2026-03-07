@@ -1,4 +1,4 @@
-pub mod drand;
+mod drand;
 
 #[cfg(feature = "extension-module")]
 mod ffi;
