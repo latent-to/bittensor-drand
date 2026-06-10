@@ -358,6 +358,116 @@ pub extern "C" fn cr_encrypt_commitment(
     }
 }
 
+/// Encrypts weights for commit-reveal using the stateful epoch model (v2).
+///
+/// # Parameters
+///
+/// * `uids_ptr` / `uids_len` - Array of neuron UIDs
+/// * `vals_ptr` / `vals_len` - Array of weight values (same length as UIDs)
+/// * `version_key` - Version key for this commitment
+/// * `last_epoch_block` - Block at which the last epoch ran
+/// * `pending_epoch_at` - Pending owner-triggered epoch block (0 if none)
+/// * `subnet_epoch_index` - Monotonic epoch counter
+/// * `tempo` - Epoch duration in blocks
+/// * `blocks_since_last_step` - Blocks since last step for the subnet
+/// * `current_block` - Chain head block number
+/// * `subnet_reveal_epochs` - Number of epochs before reveal
+/// * `block_time` - Block time in seconds
+/// * `hotkey_ptr` / `hotkey_len` - Committer hotkey public key bytes
+/// * `round_out` - Output: Drand reveal round number
+/// * `err_out` - Output: error message (NULL on success)
+///
+/// # Returns
+///
+/// A `CRByteBuffer` containing the encrypted commitment, or empty on error.
+///
+/// # Safety
+///
+/// All pointer parameters must point to valid memory of the specified length.
+#[no_mangle]
+pub extern "C" fn cr_generate_commit_v2(
+    uids_ptr: *const u16,
+    uids_len: usize,
+    vals_ptr: *const u16,
+    vals_len: usize,
+    version_key: u64,
+    last_epoch_block: u64,
+    pending_epoch_at: u64,
+    subnet_epoch_index: u64,
+    tempo: u16,
+    blocks_since_last_step: u64,
+    current_block: u64,
+    subnet_reveal_epochs: u64,
+    block_time: f64,
+    hotkey_ptr: *const u8,
+    hotkey_len: usize,
+    round_out: *mut u64,
+    err_out: *mut *mut c_char,
+) -> CRByteBuffer {
+    unsafe { *err_out = ptr::null_mut() }
+
+    if (uids_ptr.is_null() && uids_len > 0)
+        || (vals_ptr.is_null() && vals_len > 0)
+        || (hotkey_ptr.is_null() && hotkey_len > 0)
+    {
+        unsafe { *err_out = err_to_cstring("uids/values/hotkey ptr is null") };
+        return CRByteBuffer {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+    }
+
+    if uids_len != vals_len {
+        unsafe { *err_out = err_to_cstring("uids_len != vals_len") };
+        return CRByteBuffer {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+    }
+
+    let uids = if uids_len > 0 {
+        unsafe { slice::from_raw_parts(uids_ptr, uids_len) }.to_vec()
+    } else {
+        vec![]
+    };
+    let values = if vals_len > 0 {
+        unsafe { slice::from_raw_parts(vals_ptr, vals_len) }.to_vec()
+    } else {
+        vec![]
+    };
+    let hotkey = if hotkey_len > 0 {
+        unsafe { slice::from_raw_parts(hotkey_ptr, hotkey_len) }.to_vec()
+    } else {
+        vec![]
+    };
+
+    let state = crate::epoch_schedule::EpochScheduleState {
+        last_epoch_block,
+        pending_epoch_at,
+        subnet_epoch_index,
+        tempo,
+        blocks_since_last_step,
+        current_block,
+    };
+
+    match drand::generate_commit_v2(uids, values, version_key, state, subnet_reveal_epochs, block_time, hotkey) {
+        Ok((ct, rr)) => {
+            unsafe { *round_out = rr }
+            CRByteBuffer::from_vec(ct)
+        }
+        Err((ioe, msg)) => {
+            unsafe { *err_out = err_to_cstring(format!("{msg}: {ioe}")) };
+            CRByteBuffer {
+                ptr: ptr::null_mut(),
+                len: 0,
+                cap: 0,
+            }
+        }
+    }
+}
+
 // ============================================================================
 // ML-KEM-768 FFI functions (ported from mlkemffi)
 // ============================================================================
@@ -929,5 +1039,124 @@ mod tests {
         assert!(!dec_err.is_null(), "err_out should contain message");
 
         unsafe { drop_cstring(dec_err) };
+    }
+
+    #[test]
+    fn test_cr_generate_commit_v2_success() {
+        let uids: Vec<u16> = vec![1, 2, 3];
+        let values: Vec<u16> = vec![100, 200, 300];
+        let hotkey: Vec<u8> = vec![1, 2, 3];
+        let mut round: u64 = 0;
+        let mut err_ptr: *mut c_char = ptr::null_mut();
+
+        let buf = cr_generate_commit_v2(
+            uids.as_ptr(),
+            uids.len(),
+            values.as_ptr(),
+            values.len(),
+            42,   // version_key
+            100,  // last_epoch_block
+            0,    // pending_epoch_at
+            0,    // subnet_epoch_index
+            50,   // tempo
+            0,    // blocks_since_last_step
+            120,  // current_block
+            1,    // subnet_reveal_epochs
+            12.0, // block_time
+            hotkey.as_ptr(),
+            hotkey.len(),
+            &mut round,
+            &mut err_ptr,
+        );
+
+        assert!(err_ptr.is_null(), "err_out must be NULL on success");
+        assert!(!buf.ptr.is_null(), "buffer pointer must be non-NULL");
+        assert!(buf.len > 0, "ciphertext must be non-empty");
+        assert!(round > 0, "round should be set");
+
+        cr_free(buf);
+    }
+
+    #[test]
+    fn test_cr_generate_commit_v2_null_ptr() {
+        let mut round: u64 = 0;
+        let mut err_ptr: *mut c_char = ptr::null_mut();
+
+        let buf = cr_generate_commit_v2(
+            ptr::null(), // bad uids
+            3,
+            ptr::null(),
+            3,
+            42,
+            100, 0, 0, 50, 0, 120,
+            1, 12.0,
+            ptr::null(), 3,
+            &mut round,
+            &mut err_ptr,
+        );
+
+        assert!(buf.ptr.is_null());
+        assert!(!err_ptr.is_null());
+        unsafe { drop_cstring(err_ptr) };
+    }
+
+    #[test]
+    fn test_cr_generate_commit_v2_mismatched_lengths() {
+        let uids: Vec<u16> = vec![1, 2];
+        let values: Vec<u16> = vec![100];
+        let hotkey: Vec<u8> = vec![1];
+        let mut round: u64 = 0;
+        let mut err_ptr: *mut c_char = ptr::null_mut();
+
+        let buf = cr_generate_commit_v2(
+            uids.as_ptr(),
+            uids.len(),
+            values.as_ptr(),
+            values.len(),
+            42,
+            100, 0, 0, 50, 0, 120,
+            1, 12.0,
+            hotkey.as_ptr(),
+            hotkey.len(),
+            &mut round,
+            &mut err_ptr,
+        );
+
+        assert!(buf.ptr.is_null());
+        assert!(!err_ptr.is_null());
+        unsafe {
+            let msg = CStr::from_ptr(err_ptr).to_string_lossy();
+            assert!(msg.contains("uids_len != vals_len"), "got: {msg}");
+            drop_cstring(err_ptr);
+        }
+    }
+
+    #[test]
+    fn test_cr_generate_commit_v2_tempo_zero() {
+        let uids: Vec<u16> = vec![1];
+        let values: Vec<u16> = vec![100];
+        let hotkey: Vec<u8> = vec![1];
+        let mut round: u64 = 0;
+        let mut err_ptr: *mut c_char = ptr::null_mut();
+
+        let buf = cr_generate_commit_v2(
+            uids.as_ptr(),
+            uids.len(),
+            values.as_ptr(),
+            values.len(),
+            42,
+            100, 0, 0,
+            0,   // tempo = 0
+            0, 120,
+            1, 12.0,
+            hotkey.as_ptr(),
+            hotkey.len(),
+            &mut round,
+            &mut err_ptr,
+        );
+
+        assert!(buf.ptr.is_null());
+        assert!(!err_ptr.is_null());
+        unsafe { drop_cstring(err_ptr) };
     }
 }
